@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { collection, query, where, getDocs, doc, getDoc, onSnapshot, addDoc } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc, onSnapshot, addDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Calendar, Clock, MapPin, User, Plus, BarChart3, CreditCard, Users, Building, FileText } from 'lucide-react';
+import { Calendar, Clock, MapPin, User, Plus, BarChart3, CreditCard, Users, Building, FileText, Shield, UserCheck, Trash2, Check, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import AddCard from './AddCard';
 import CardList from './CardList';
@@ -51,15 +51,34 @@ type HostRequestFormData = {
   comments: string;
 };
 
+type CardData = {
+  id: string;
+  title: string;
+  imageUrl: string;
+  type: string;
+  openingTime: string;
+  closingTime: string;
+  userId: string;
+  createdAt: any;
+  Card_ID: string;
+};
+
+type MakeHostFormData = {
+  email: string;
+  userId: string;
+};
+
 const Dashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user, userProfile, hasRole, hasAnyRole } = useAuth();
   const navigate = useNavigate();
   const [bookings, setBookings] = useState<BookingData[]>([]);
   const [openSlotBookings, setOpenSlotBookings] = useState<BookingData[]>([]);
   const [hostRequests, setHostRequests] = useState<HostRequest[]>([]);
+  const [allHostRequests, setAllHostRequests] = useState<HostRequest[]>([]);
+  const [allCards, setAllCards] = useState<CardData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeSection, setActiveSection] = useState<'bookings' | 'cards' | 'openSlots' | 'hostRequest' | 'requests'>('bookings');
+  const [activeSection, setActiveSection] = useState<'bookings' | 'cards' | 'openSlots' | 'hostRequest' | 'requests' | 'adminCards' | 'adminRequests' | 'makeHost'>('bookings');
   const [showAddCardForm, setShowAddCardForm] = useState(false);
   const [hostRequestForm, setHostRequestForm] = useState<HostRequestFormData>({
     fullName: '',
@@ -73,7 +92,13 @@ const Dashboard: React.FC = () => {
     closingTime: '',
     comments: ''
   });
+  const [makeHostForm, setMakeHostForm] = useState<MakeHostFormData>({
+    email: '',
+    userId: ''
+  });
   const [submittingRequest, setSubmittingRequest] = useState(false);
+  const [processingRequest, setProcessingRequest] = useState<string | null>(null);
+  const [makingHost, setMakingHost] = useState(false);
 
   useEffect(() => {
     if (user?.email) {
@@ -81,127 +106,166 @@ const Dashboard: React.FC = () => {
     }
   }, [user?.email]);
 
+  // Set default active section based on user role
   useEffect(() => {
-    const fetchBookings = async () => {
-      if (!user) {
+    if (userProfile) {
+      if (hasRole('admin')) {
+        setActiveSection('adminRequests');
+      } else if (hasRole('host')) {
+        setActiveSection('cards');
+      } else {
+        setActiveSection('bookings');
+      }
+    }
+  }, [userProfile, hasRole]);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      if (!user || !userProfile) {
         setLoading(false);
         return;
       }
 
       try {
-        // Fetch all bookings for the current user
-        const q = query(
-          collection(db, 'bookings'),
-          where('userId', '==', user.uid)
-        );
-        
-        // Set up real-time listener for bookings
-        const unsubscribe = onSnapshot(q, async (querySnapshot) => {
-          const bookingsData: BookingData[] = [];
-          const openSlotBookingsData: BookingData[] = [];
+        // Fetch user's bookings (for users and hosts)
+        if (hasAnyRole(['user', 'host'])) {
+          const bookingsQuery = query(
+            collection(db, 'bookings'),
+            where('userId', '==', user.uid)
+          );
+          
+          const unsubscribeBookings = onSnapshot(bookingsQuery, async (querySnapshot) => {
+            const bookingsData: BookingData[] = [];
+            const openSlotBookingsData: BookingData[] = [];
 
-          // For each booking, also fetch the card details
-          for (const docSnapshot of querySnapshot.docs) {
-            const bookingData = {
-              id: docSnapshot.id,
-              ...docSnapshot.data()
-            } as BookingData;
+            for (const docSnapshot of querySnapshot.docs) {
+              const bookingData = {
+                id: docSnapshot.id,
+                ...docSnapshot.data()
+              } as BookingData;
 
-            // Fetch card details
-            try {
-              const cardDoc = await getDoc(doc(db, 'cards', bookingData.cardId));
-              if (cardDoc.exists()) {
-                const cardData = cardDoc.data();
-                bookingData.cardTitle = cardData.title;
-                bookingData.cardType = cardData.type;
-                bookingData.cardImageUrl = cardData.imageUrl;
+              try {
+                const cardDoc = await getDoc(doc(db, 'cards', bookingData.cardId));
+                if (cardDoc.exists()) {
+                  const cardData = cardDoc.data();
+                  bookingData.cardTitle = cardData.title;
+                  bookingData.cardType = cardData.type;
+                  bookingData.cardImageUrl = cardData.imageUrl;
+                }
+              } catch (cardError) {
+                console.error('Error fetching card details:', cardError);
               }
-            } catch (cardError) {
-              console.error('Error fetching card details:', cardError);
-            }
 
-            bookingsData.push(bookingData);
+              bookingsData.push(bookingData);
 
-            // Separate bookings with open slots
-            if (bookingData.openSlots && bookingData.openSlots > 0) {
-              // Only include future bookings with open slots
-              const bookingDateTime = new Date(bookingData.date + ' ' + bookingData.timeSlot);
-              if (bookingDateTime > new Date()) {
-                openSlotBookingsData.push(bookingData);
+              if (bookingData.openSlots && bookingData.openSlots > 0) {
+                const bookingDateTime = new Date(bookingData.date + ' ' + bookingData.timeSlot);
+                if (bookingDateTime > new Date()) {
+                  openSlotBookingsData.push(bookingData);
+                }
               }
             }
-          }
 
-          // Sort bookings by date and time (most recent first)
-          bookingsData.sort((a, b) => {
-            const dateA = new Date(a.date + ' ' + a.timeSlot);
-            const dateB = new Date(b.date + ' ' + b.timeSlot);
-            return dateB.getTime() - dateA.getTime();
+            bookingsData.sort((a, b) => {
+              const dateA = new Date(a.date + ' ' + a.timeSlot);
+              const dateB = new Date(b.date + ' ' + b.timeSlot);
+              return dateB.getTime() - dateA.getTime();
+            });
+
+            openSlotBookingsData.sort((a, b) => {
+              const dateA = new Date(a.date + ' ' + a.timeSlot);
+              const dateB = new Date(b.date + ' ' + b.timeSlot);
+              return dateA.getTime() - dateB.getTime();
+            });
+
+            setBookings(bookingsData);
+            setOpenSlotBookings(openSlotBookingsData);
+          });
+        }
+
+        // Fetch user's host requests (for users)
+        if (hasRole('user')) {
+          const requestsQuery = query(
+            collection(db, 'Requests'),
+            where('userId', '==', user.uid)
+          );
+
+          const unsubscribeRequests = onSnapshot(requestsQuery, (querySnapshot) => {
+            const requestsData: HostRequest[] = [];
+            
+            querySnapshot.forEach((doc) => {
+              requestsData.push({
+                id: doc.id,
+                ...doc.data()
+              } as HostRequest);
+            });
+
+            requestsData.sort((a, b) => {
+              const dateA = a.createdAt?.toDate?.() || new Date(0);
+              const dateB = b.createdAt?.toDate?.() || new Date(0);
+              return dateB.getTime() - dateA.getTime();
+            });
+
+            setHostRequests(requestsData);
+          });
+        }
+
+        // Fetch all host requests (for admins)
+        if (hasRole('admin')) {
+          const allRequestsQuery = query(collection(db, 'Requests'));
+
+          const unsubscribeAllRequests = onSnapshot(allRequestsQuery, (querySnapshot) => {
+            const requestsData: HostRequest[] = [];
+            
+            querySnapshot.forEach((doc) => {
+              requestsData.push({
+                id: doc.id,
+                ...doc.data()
+              } as HostRequest);
+            });
+
+            requestsData.sort((a, b) => {
+              const dateA = a.createdAt?.toDate?.() || new Date(0);
+              const dateB = b.createdAt?.toDate?.() || new Date(0);
+              return dateB.getTime() - dateA.getTime();
+            });
+
+            setAllHostRequests(requestsData);
           });
 
-          // Sort open slot bookings by date and time (soonest first)
-          openSlotBookingsData.sort((a, b) => {
-            const dateA = new Date(a.date + ' ' + a.timeSlot);
-            const dateB = new Date(b.date + ' ' + b.timeSlot);
-            return dateA.getTime() - dateB.getTime();
+          // Fetch all cards (for admins)
+          const allCardsQuery = query(collection(db, 'cards'));
+
+          const unsubscribeAllCards = onSnapshot(allCardsQuery, (querySnapshot) => {
+            const cardsData: CardData[] = [];
+            
+            querySnapshot.forEach((doc) => {
+              cardsData.push({
+                id: doc.id,
+                ...doc.data()
+              } as CardData);
+            });
+
+            cardsData.sort((a, b) => {
+              const dateA = a.createdAt?.toDate?.() || new Date(0);
+              const dateB = b.createdAt?.toDate?.() || new Date(0);
+              return dateB.getTime() - dateA.getTime();
+            });
+
+            setAllCards(cardsData);
           });
+        }
 
-          setBookings(bookingsData);
-          setOpenSlotBookings(openSlotBookingsData);
-          setLoading(false);
-        });
-
-        return unsubscribe;
+        setLoading(false);
       } catch (err) {
-        console.error('Error fetching bookings:', err);
-        setError('Failed to load your bookings');
+        console.error('Error fetching data:', err);
+        setError('Failed to load dashboard data');
         setLoading(false);
       }
     };
 
-    const fetchHostRequests = async () => {
-      if (!user) return;
-
-      try {
-        const q = query(
-          collection(db, 'Requests'),
-          where('userId', '==', user.uid)
-        );
-
-        const unsubscribe = onSnapshot(q, (querySnapshot) => {
-          const requestsData: HostRequest[] = [];
-          
-          querySnapshot.forEach((doc) => {
-            requestsData.push({
-              id: doc.id,
-              ...doc.data()
-            } as HostRequest);
-          });
-
-          // Sort by creation date (most recent first)
-          requestsData.sort((a, b) => {
-            const dateA = a.createdAt?.toDate?.() || new Date(0);
-            const dateB = b.createdAt?.toDate?.() || new Date(0);
-            return dateB.getTime() - dateA.getTime();
-          });
-
-          setHostRequests(requestsData);
-        });
-
-        return unsubscribe;
-      } catch (err) {
-        console.error('Error fetching host requests:', err);
-      }
-    };
-
-    const unsubscribeBookings = fetchBookings();
-    const unsubscribeRequests = fetchHostRequests();
-    
-    return () => {
-      if (unsubscribeBookings) unsubscribeBookings();
-      if (unsubscribeRequests) unsubscribeRequests();
-    };
-  }, [user]);
+    fetchData();
+  }, [user, userProfile, hasRole, hasAnyRole]);
 
   const handleCardClick = (cardId: string) => {
     navigate(`/card/${cardId}`);
@@ -215,7 +279,6 @@ const Dashboard: React.FC = () => {
       return;
     }
 
-    // Validate required fields
     const requiredFields = ['fullName', 'phoneNumber', 'email', 'businessName', 'businessType', 'businessLocation', 'businessImageUrl', 'openingTime', 'closingTime'];
     const missingFields = requiredFields.filter(field => !hostRequestForm[field as keyof HostRequestFormData]);
     
@@ -235,7 +298,6 @@ const Dashboard: React.FC = () => {
         createdAt: new Date()
       });
 
-      // Reset form
       setHostRequestForm({
         fullName: '',
         phoneNumber: '',
@@ -249,7 +311,6 @@ const Dashboard: React.FC = () => {
         comments: ''
       });
 
-      // Switch to requests section to show the submitted request
       setActiveSection('requests');
       
     } catch (err) {
@@ -257,6 +318,110 @@ const Dashboard: React.FC = () => {
       setError('Failed to submit request. Please try again.');
     } finally {
       setSubmittingRequest(false);
+    }
+  };
+
+  const handleRequestAction = async (requestId: string, action: 'approved' | 'rejected') => {
+    setProcessingRequest(requestId);
+    
+    try {
+      const requestRef = doc(db, 'Requests', requestId);
+      await updateDoc(requestRef, {
+        status: action,
+        processedAt: new Date(),
+        processedBy: user?.uid
+      });
+
+      // If approved, update user role to host
+      if (action === 'approved') {
+        const request = allHostRequests.find(r => r.id === requestId);
+        if (request) {
+          const userRef = doc(db, 'users', request.userId);
+          await updateDoc(userRef, {
+            role: 'host',
+            updatedAt: new Date()
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error processing request:', err);
+      setError('Failed to process request. Please try again.');
+    } finally {
+      setProcessingRequest(null);
+    }
+  };
+
+  const handleMakeHost = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!makeHostForm.email && !makeHostForm.userId) {
+      setError('Please provide either email or user ID');
+      return;
+    }
+
+    setMakingHost(true);
+    setError('');
+
+    try {
+      let userQuery;
+      if (makeHostForm.userId) {
+        // Direct user ID lookup
+        const userRef = doc(db, 'users', makeHostForm.userId);
+        const userDoc = await getDoc(userRef);
+        
+        if (userDoc.exists()) {
+          await updateDoc(userRef, {
+            role: 'host',
+            updatedAt: new Date(),
+            promotedBy: user?.uid
+          });
+          
+          setMakeHostForm({ email: '', userId: '' });
+          alert('User successfully promoted to host!');
+        } else {
+          setError('User not found with that ID');
+        }
+      } else {
+        // Email lookup
+        userQuery = query(
+          collection(db, 'users'),
+          where('email', '==', makeHostForm.email)
+        );
+        
+        const querySnapshot = await getDocs(userQuery);
+        
+        if (!querySnapshot.empty) {
+          const userDoc = querySnapshot.docs[0];
+          await updateDoc(userDoc.ref, {
+            role: 'host',
+            updatedAt: new Date(),
+            promotedBy: user?.uid
+          });
+          
+          setMakeHostForm({ email: '', userId: '' });
+          alert('User successfully promoted to host!');
+        } else {
+          setError('User not found with that email');
+        }
+      }
+    } catch (err) {
+      console.error('Error making user host:', err);
+      setError('Failed to promote user. Please try again.');
+    } finally {
+      setMakingHost(false);
+    }
+  };
+
+  const handleDeleteCard = async (cardId: string) => {
+    if (!confirm('Are you sure you want to delete this card? This action cannot be undone.')) {
+      return;
+    }
+
+    try {
+      await deleteDoc(doc(db, 'cards', cardId));
+    } catch (err) {
+      console.error('Error deleting card:', err);
+      setError('Failed to delete card. Please try again.');
     }
   };
 
@@ -287,7 +452,7 @@ const Dashboard: React.FC = () => {
     });
   };
 
-  if (!user) {
+  if (!user || !userProfile) {
     return (
       <div className="container mx-auto px-4 py-8">
         <div className="text-center bg-white rounded-xl shadow-lg p-12">
@@ -335,6 +500,145 @@ const Dashboard: React.FC = () => {
     </div>
   );
 
+  const renderSidebarNavigation = () => (
+    <nav className="space-y-2">
+      {/* User sections */}
+      {hasAnyRole(['user', 'host']) && (
+        <>
+          <button
+            onClick={() => setActiveSection('bookings')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'bookings'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <Calendar className="w-5 h-5" />
+            <span className="font-medium">Your Bookings</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('openSlots')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'openSlots'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <Users className="w-5 h-5" />
+            <div className="flex items-center justify-between w-full">
+              <span className="font-medium">Your Open Slots</span>
+              {openSlotBookings.length > 0 && (
+                <span className="bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">
+                  {openSlotBookings.length}
+                </span>
+              )}
+            </div>
+          </button>
+        </>
+      )}
+
+      {/* User-only sections */}
+      {hasRole('user') && (
+        <>
+          <button
+            onClick={() => setActiveSection('hostRequest')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'hostRequest'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <Building className="w-5 h-5" />
+            <span className="font-medium">Request to become a host</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('requests')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'requests'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <FileText className="w-5 h-5" />
+            <div className="flex items-center justify-between w-full">
+              <span className="font-medium">Requests</span>
+              {hostRequests.length > 0 && (
+                <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">
+                  {hostRequests.length}
+                </span>
+              )}
+            </div>
+          </button>
+        </>
+      )}
+
+      {/* Host sections */}
+      {hasRole('host') && (
+        <button
+          onClick={() => setActiveSection('cards')}
+          className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+            activeSection === 'cards'
+              ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+              : 'text-gray-600 hover:bg-gray-100'
+          }`}
+        >
+          <CreditCard className="w-5 h-5" />
+          <span className="font-medium">Your Cards</span>
+        </button>
+      )}
+
+      {/* Admin sections */}
+      {hasRole('admin') && (
+        <>
+          <button
+            onClick={() => setActiveSection('adminCards')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'adminCards'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <CreditCard className="w-5 h-5" />
+            <span className="font-medium">Cards</span>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('adminRequests')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'adminRequests'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <FileText className="w-5 h-5" />
+            <div className="flex items-center justify-between w-full">
+              <span className="font-medium">Requests</span>
+              {allHostRequests.filter(r => r.status === 'pending').length > 0 && (
+                <span className="bg-yellow-100 text-yellow-800 text-xs px-2 py-1 rounded-full">
+                  {allHostRequests.filter(r => r.status === 'pending').length}
+                </span>
+              )}
+            </div>
+          </button>
+
+          <button
+            onClick={() => setActiveSection('makeHost')}
+            className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+              activeSection === 'makeHost'
+                ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            <UserCheck className="w-5 h-5" />
+            <span className="font-medium">Make a host</span>
+          </button>
+        </>
+      )}
+    </nav>
+  );
+
   return (
     <div className="min-h-screen bg-gray-50">
       <div className="flex">
@@ -347,85 +651,14 @@ const Dashboard: React.FC = () => {
               </div>
               <div>
                 <h2 className="text-xl font-bold text-gray-900">Dashboard</h2>
-                <p className="text-sm text-gray-500">Manage your account</p>
+                <p className="text-sm text-gray-500">
+                  {userProfile.role === 'admin' ? 'Admin Panel' : 
+                   userProfile.role === 'host' ? 'Host Panel' : 'User Panel'}
+                </p>
               </div>
             </div>
 
-            <nav className="space-y-2">
-              <button
-                onClick={() => setActiveSection('bookings')}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
-                  activeSection === 'bookings'
-                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
-                    : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                <Calendar className="w-5 h-5" />
-                <span className="font-medium">Your Bookings</span>
-              </button>
-
-              <button
-                onClick={() => setActiveSection('openSlots')}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
-                  activeSection === 'openSlots'
-                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
-                    : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                <Users className="w-5 h-5" />
-                <div className="flex items-center justify-between w-full">
-                  <span className="font-medium">Your Open Slots</span>
-                  {openSlotBookings.length > 0 && (
-                    <span className="bg-green-100 text-green-800 text-xs px-2 py-1 rounded-full">
-                      {openSlotBookings.length}
-                    </span>
-                  )}
-                </div>
-              </button>
-
-              <button
-                onClick={() => setActiveSection('cards')}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
-                  activeSection === 'cards'
-                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
-                    : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                <CreditCard className="w-5 h-5" />
-                <span className="font-medium">Your Cards</span>
-              </button>
-
-              <button
-                onClick={() => setActiveSection('hostRequest')}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
-                  activeSection === 'hostRequest'
-                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
-                    : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                <Building className="w-5 h-5" />
-                <span className="font-medium">Request to become a host</span>
-              </button>
-
-              <button
-                onClick={() => setActiveSection('requests')}
-                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
-                  activeSection === 'requests'
-                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
-                    : 'text-gray-600 hover:bg-gray-100'
-                }`}
-              >
-                <FileText className="w-5 h-5" />
-                <div className="flex items-center justify-between w-full">
-                  <span className="font-medium">Requests</span>
-                  {hostRequests.length > 0 && (
-                    <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">
-                      {hostRequests.length}
-                    </span>
-                  )}
-                </div>
-              </button>
-            </nav>
+            {renderSidebarNavigation()}
           </div>
         </div>
 
@@ -435,11 +668,14 @@ const Dashboard: React.FC = () => {
           <div className="bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl p-8 mb-8">
             <div className="flex items-center space-x-4">
               <div className="w-16 h-16 bg-white/20 rounded-full flex items-center justify-center">
-                <User className="w-8 h-8" />
+                {userProfile.role === 'admin' ? <Shield className="w-8 h-8" /> :
+                 userProfile.role === 'host' ? <Building className="w-8 h-8" /> :
+                 <User className="w-8 h-8" />}
               </div>
               <div>
                 <h1 className="text-3xl font-bold">Welcome back!</h1>
                 <p className="text-blue-100 text-lg">{user.email}</p>
+                <p className="text-blue-200 text-sm capitalize">{userProfile.role} Account</p>
               </div>
             </div>
           </div>
@@ -451,7 +687,7 @@ const Dashboard: React.FC = () => {
           )}
 
           {/* Content based on active section */}
-          {activeSection === 'bookings' && (
+          {activeSection === 'bookings' && hasAnyRole(['user', 'host']) && (
             <div>
               {/* Booking Statistics */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -545,7 +781,7 @@ const Dashboard: React.FC = () => {
             </div>
           )}
 
-          {activeSection === 'openSlots' && (
+          {activeSection === 'openSlots' && hasAnyRole(['user', 'host']) && (
             <div>
               <div className="bg-white rounded-xl shadow-lg p-8">
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Your Open Slots</h2>
@@ -634,7 +870,7 @@ const Dashboard: React.FC = () => {
             </div>
           )}
 
-          {activeSection === 'cards' && (
+          {activeSection === 'cards' && hasRole('host') && (
             <div>
               <div className="bg-white rounded-xl shadow-lg p-8">
                 <div className="flex justify-between items-center mb-6">
@@ -652,7 +888,7 @@ const Dashboard: React.FC = () => {
             </div>
           )}
 
-          {activeSection === 'hostRequest' && (
+          {activeSection === 'hostRequest' && hasRole('user') && (
             <div>
               <div className="bg-white rounded-xl shadow-lg p-8">
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Request to become a host</h2>
@@ -824,7 +1060,7 @@ const Dashboard: React.FC = () => {
             </div>
           )}
 
-          {activeSection === 'requests' && (
+          {activeSection === 'requests' && hasRole('user') && (
             <div>
               <div className="bg-white rounded-xl shadow-lg p-8">
                 <h2 className="text-2xl font-bold text-gray-900 mb-6">Your Requests</h2>
@@ -891,6 +1127,243 @@ const Dashboard: React.FC = () => {
                     ))}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Admin sections */}
+          {activeSection === 'adminCards' && hasRole('admin') && (
+            <div>
+              <div className="bg-white rounded-xl shadow-lg p-8">
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl font-bold text-gray-900">All Cards</h2>
+                  <button
+                    onClick={() => setShowAddCardForm(true)}
+                    className="inline-flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-200 shadow-md hover:shadow-lg font-medium"
+                  >
+                    <Plus className="w-5 h-5 mr-2" />
+                    Add New Card
+                  </button>
+                </div>
+
+                {allCards.length === 0 ? (
+                  <div className="text-center py-12">
+                    <CreditCard className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-600 mb-2">No cards yet</h3>
+                    <p className="text-gray-500">No cards have been created yet.</p>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {allCards.map((card) => (
+                      <div key={card.id} className="bg-white rounded-lg shadow-lg overflow-hidden hover:shadow-xl transition-all duration-300">
+                        <div className="relative h-48 bg-gray-200">
+                          <img 
+                            src={card.imageUrl} 
+                            alt={card.title} 
+                            className="w-full h-full object-cover cursor-pointer"
+                            onClick={() => handleCardClick(card.id)}
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.src = 'https://images.pexels.com/photos/3657154/pexels-photo-3657154.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2';
+                            }}
+                          />
+                          <div className="absolute top-2 right-2">
+                            <button
+                              onClick={() => handleDeleteCard(card.id)}
+                              className="p-2 bg-red-600 text-white rounded-full hover:bg-red-700 transition-colors duration-200"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </div>
+                        <div className="p-6">
+                          <h3 
+                            className="text-xl font-semibold text-gray-900 mb-2 cursor-pointer hover:text-blue-600 transition-colors"
+                            onClick={() => handleCardClick(card.id)}
+                          >
+                            {card.title}
+                          </h3>
+                          <div className="flex items-center justify-between mb-3">
+                            <span className="inline-block bg-blue-100 text-blue-800 text-sm px-3 py-1 rounded-full">
+                              {card.type}
+                            </span>
+                            <span className="text-gray-500 text-sm">
+                              {card.createdAt?.toDate?.()?.toLocaleDateString() || 'Recently added'}
+                            </span>
+                          </div>
+                          
+                          {(card.openingTime || card.closingTime) && (
+                            <div className="flex items-center text-gray-600 text-sm mt-2">
+                              <Clock className="w-4 h-4 mr-2" />
+                              <span>
+                                {card.openingTime && card.closingTime 
+                                  ? `${card.openingTime} - ${card.closingTime}`
+                                  : card.openingTime || card.closingTime
+                                }
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'adminRequests' && hasRole('admin') && (
+            <div>
+              <div className="bg-white rounded-xl shadow-lg p-8">
+                <h2 className="text-2xl font-bold text-gray-900 mb-6">Host Requests</h2>
+                <p className="text-gray-600 mb-6">
+                  Review and manage host requests from users.
+                </p>
+
+                {allHostRequests.length === 0 ? (
+                  <div className="text-center py-12">
+                    <FileText className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-600 mb-2">No requests yet</h3>
+                    <p className="text-gray-500">No host requests have been submitted yet.</p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {allHostRequests.map((request) => (
+                      <div key={request.id} className="border border-gray-200 rounded-lg p-6">
+                        <div className="flex items-start justify-between mb-4">
+                          <div>
+                            <h3 className="text-lg font-semibold text-gray-900">{request.businessName}</h3>
+                            <p className="text-gray-600">{request.businessType}</p>
+                            <p className="text-sm text-gray-500">Requested by: {request.email}</p>
+                          </div>
+                          <div className="flex items-center space-x-2">
+                            <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                              request.status === 'pending' 
+                                ? 'bg-yellow-100 text-yellow-800'
+                                : request.status === 'approved'
+                                ? 'bg-green-100 text-green-800'
+                                : 'bg-red-100 text-red-800'
+                            }`}>
+                              {request.status.charAt(0).toUpperCase() + request.status.slice(1)}
+                            </span>
+                            
+                            {request.status === 'pending' && (
+                              <div className="flex space-x-2">
+                                <button
+                                  onClick={() => handleRequestAction(request.id, 'approved')}
+                                  disabled={processingRequest === request.id}
+                                  className="p-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors duration-200 disabled:opacity-50"
+                                >
+                                  <Check className="w-4 h-4" />
+                                </button>
+                                <button
+                                  onClick={() => handleRequestAction(request.id, 'rejected')}
+                                  disabled={processingRequest === request.id}
+                                  className="p-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors duration-200 disabled:opacity-50"
+                                >
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-600">
+                          <div>
+                            <span className="font-medium">Full Name:</span> {request.fullName}
+                          </div>
+                          <div>
+                            <span className="font-medium">Phone:</span> {request.phoneNumber}
+                          </div>
+                          <div>
+                            <span className="font-medium">Location:</span> {request.businessLocation}
+                          </div>
+                          <div>
+                            <span className="font-medium">Hours:</span> {request.openingTime} - {request.closingTime}
+                          </div>
+                          <div>
+                            <span className="font-medium">Submitted:</span> {request.createdAt?.toDate?.()?.toLocaleDateString() || 'Recently'}
+                          </div>
+                        </div>
+
+                        {request.comments && (
+                          <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+                            <span className="font-medium text-gray-700">Comments:</span>
+                            <p className="text-gray-600 mt-1">{request.comments}</p>
+                          </div>
+                        )}
+
+                        {request.businessImageUrl && (
+                          <div className="mt-4">
+                            <span className="font-medium text-gray-700">Business Image:</span>
+                            <img 
+                              src={request.businessImageUrl} 
+                              alt={request.businessName}
+                              className="mt-2 w-32 h-32 object-cover rounded-lg"
+                              onError={(e) => {
+                                const target = e.target as HTMLImageElement;
+                                target.src = 'https://images.pexels.com/photos/3657154/pexels-photo-3657154.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2';
+                              }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'makeHost' && hasRole('admin') && (
+            <div>
+              <div className="bg-white rounded-xl shadow-lg p-8">
+                <h2 className="text-2xl font-bold text-gray-900 mb-6">Make a Host</h2>
+                <p className="text-gray-600 mb-8">
+                  Promote a user to host status by entering their email or user ID.
+                </p>
+
+                <form onSubmit={handleMakeHost} className="space-y-6">
+                  <div>
+                    <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+                      Email Address
+                    </label>
+                    <input
+                      type="email"
+                      id="email"
+                      value={makeHostForm.email}
+                      onChange={(e) => setMakeHostForm(prev => ({ ...prev, email: e.target.value }))}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                      placeholder="Enter user's email address"
+                    />
+                  </div>
+
+                  <div className="text-center text-gray-500">
+                    <span>OR</span>
+                  </div>
+
+                  <div>
+                    <label htmlFor="userId" className="block text-sm font-medium text-gray-700 mb-2">
+                      User ID
+                    </label>
+                    <input
+                      type="text"
+                      id="userId"
+                      value={makeHostForm.userId}
+                      onChange={(e) => setMakeHostForm(prev => ({ ...prev, userId: e.target.value }))}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                      placeholder="Enter user's ID"
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={makingHost || (!makeHostForm.email && !makeHostForm.userId)}
+                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium"
+                  >
+                    {makingHost ? 'Promoting User...' : 'Make Host'}
+                  </button>
+                </form>
               </div>
             </div>
           )}

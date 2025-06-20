@@ -22,7 +22,7 @@ export default function CardList() {
   const [editingCard, setEditingCard] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<CardData>>({});
   const [saving, setSaving] = useState(false);
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -32,16 +32,31 @@ export default function CardList() {
       return;
     }
 
-    const q = query(
-      collection(db, 'cards'),
-      where('userId', '==', user.uid),
-    );
+    let q;
+    if (hasRole('admin')) {
+      // Admins can see all cards
+      q = query(collection(db, 'cards'));
+    } else {
+      // Hosts can only see their own cards
+      q = query(
+        collection(db, 'cards'),
+        where('userId', '==', user.uid)
+      );
+    }
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const items = snapshot.docs.map((doc) => ({
         id: doc.id,
         ...doc.data()
       })) as CardData[];
+      
+      // Sort by creation date (most recent first)
+      items.sort((a, b) => {
+        const dateA = a.createdAt?.toDate?.() || new Date(0);
+        const dateB = b.createdAt?.toDate?.() || new Date(0);
+        return dateB.getTime() - dateA.getTime();
+      });
+      
       setCards(items);
       setLoading(false);
     }, (error) => {
@@ -50,7 +65,7 @@ export default function CardList() {
     });
 
     return () => unsubscribe();
-  }, [user]);
+  }, [user, hasRole]);
 
   const handleEditClick = (card: CardData) => {
     setEditingCard(card.id);
@@ -102,6 +117,10 @@ export default function CardList() {
     }));
   };
 
+  const handleCardClick = (cardId: string) => {
+    navigate(`/card/${cardId}`);
+  };
+
   if (loading) {
     return (
       <div className="flex justify-center items-center py-12">
@@ -113,7 +132,7 @@ export default function CardList() {
   if (!user) {
     return (
       <div className="text-center py-12">
-        <p className="text-gray-500">Please log in to view your cards.</p>
+        <p className="text-gray-500">Please log in to view cards.</p>
       </div>
     );
   }
@@ -121,7 +140,9 @@ export default function CardList() {
   if (cards.length === 0) {
     return (
       <div className="text-center py-12">
-        <p className="text-gray-500 text-lg">No cards yet. Add your first card!</p>
+        <p className="text-gray-500 text-lg">
+          {hasRole('admin') ? 'No cards in the system yet.' : 'No cards yet. Add your first card!'}
+        </p>
       </div>
     );
   }
@@ -149,15 +170,23 @@ export default function CardList() {
                 src={card.imageUrl} 
                 alt={card.title} 
                 className="w-full h-full object-cover cursor-pointer"
-                onClick={() => navigate(`/card/${card.id}`)}
+                onClick={() => handleCardClick(card.id)}
                 onError={(e) => {
                   const target = e.target as HTMLImageElement;
                   target.src = 'https://images.pexels.com/photos/3657154/pexels-photo-3657154.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2';
                 }}
               />
             )}
-            <div className="absolute top-2 left-2 bg-purple-600 text-white px-2 py-1 rounded text-sm">
-              Your Card
+            <div className="absolute top-2 left-2">
+              {hasRole('admin') ? (
+                <span className="bg-red-600 text-white px-2 py-1 rounded text-sm">
+                  Admin View
+                </span>
+              ) : (
+                <span className="bg-purple-600 text-white px-2 py-1 rounded text-sm">
+                  Your Card
+                </span>
+              )}
             </div>
             <div className="absolute top-2 right-2">
               {editingCard === card.id ? (
@@ -177,12 +206,15 @@ export default function CardList() {
                   </button>
                 </div>
               ) : (
-                <button
-                  onClick={() => handleEditClick(card)}
-                  className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-colors duration-200"
-                >
-                  <Edit className="w-4 h-4" />
-                </button>
+                // Only show edit button if user owns the card or is admin
+                (hasRole('admin') || card.userId === user?.uid) && (
+                  <button
+                    onClick={() => handleEditClick(card)}
+                    className="p-2 bg-blue-600 text-white rounded-full hover:bg-blue-700 transition-colors duration-200"
+                  >
+                    <Edit className="w-4 h-4" />
+                  </button>
+                )
               )}
             </div>
           </div>
@@ -224,7 +256,7 @@ export default function CardList() {
               <>
                 <h3 
                   className="text-xl font-semibold text-gray-900 mb-2 cursor-pointer hover:text-blue-600 transition-colors"
-                  onClick={() => navigate(`/card/${card.id}`)}
+                  onClick={() => handleCardClick(card.id)}
                 >
                   {card.title}
                 </h3>
@@ -247,6 +279,15 @@ export default function CardList() {
                         : card.openingTime || card.closingTime
                       }
                     </span>
+                  </div>
+                )}
+
+                {/* Show creator info for admins */}
+                {hasRole('admin') && (
+                  <div className="mt-3 pt-3 border-t border-gray-200">
+                    <p className="text-xs text-gray-500">
+                      Created by: {card.userId}
+                    </p>
                   </div>
                 )}
               </>
