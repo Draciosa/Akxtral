@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { collection, query, where, getDocs, doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, getDoc, onSnapshot, addDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Calendar, Clock, MapPin, User, Plus, BarChart3, CreditCard, Users } from 'lucide-react';
+import { Calendar, Clock, MapPin, User, Plus, BarChart3, CreditCard, Users, Building, FileText } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import AddCard from './AddCard';
 import CardList from './CardList';
@@ -21,15 +21,65 @@ type BookingData = {
   cardImageUrl?: string;
 };
 
+type HostRequest = {
+  id: string;
+  userId: string;
+  fullName: string;
+  phoneNumber: string;
+  email: string;
+  businessName: string;
+  businessType: string;
+  businessLocation: string;
+  businessImageUrl: string;
+  openingTime: string;
+  closingTime: string;
+  comments?: string;
+  createdAt: any;
+  status: 'pending' | 'approved' | 'rejected';
+};
+
+type HostRequestFormData = {
+  fullName: string;
+  phoneNumber: string;
+  email: string;
+  businessName: string;
+  businessType: string;
+  businessLocation: string;
+  businessImageUrl: string;
+  openingTime: string;
+  closingTime: string;
+  comments: string;
+};
+
 const Dashboard: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [bookings, setBookings] = useState<BookingData[]>([]);
   const [openSlotBookings, setOpenSlotBookings] = useState<BookingData[]>([]);
+  const [hostRequests, setHostRequests] = useState<HostRequest[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [activeSection, setActiveSection] = useState<'bookings' | 'cards' | 'openSlots'>('bookings');
+  const [activeSection, setActiveSection] = useState<'bookings' | 'cards' | 'openSlots' | 'hostRequest' | 'requests'>('bookings');
   const [showAddCardForm, setShowAddCardForm] = useState(false);
+  const [hostRequestForm, setHostRequestForm] = useState<HostRequestFormData>({
+    fullName: '',
+    phoneNumber: '',
+    email: user?.email || '',
+    businessName: '',
+    businessType: '',
+    businessLocation: '',
+    businessImageUrl: '',
+    openingTime: '',
+    closingTime: '',
+    comments: ''
+  });
+  const [submittingRequest, setSubmittingRequest] = useState(false);
+
+  useEffect(() => {
+    if (user?.email) {
+      setHostRequestForm(prev => ({ ...prev, email: user.email || '' }));
+    }
+  }, [user?.email]);
 
   useEffect(() => {
     const fetchBookings = async () => {
@@ -109,11 +159,113 @@ const Dashboard: React.FC = () => {
       }
     };
 
-    const unsubscribe = fetchBookings();
+    const fetchHostRequests = async () => {
+      if (!user) return;
+
+      try {
+        const q = query(
+          collection(db, 'Requests'),
+          where('userId', '==', user.uid)
+        );
+
+        const unsubscribe = onSnapshot(q, (querySnapshot) => {
+          const requestsData: HostRequest[] = [];
+          
+          querySnapshot.forEach((doc) => {
+            requestsData.push({
+              id: doc.id,
+              ...doc.data()
+            } as HostRequest);
+          });
+
+          // Sort by creation date (most recent first)
+          requestsData.sort((a, b) => {
+            const dateA = a.createdAt?.toDate?.() || new Date(0);
+            const dateB = b.createdAt?.toDate?.() || new Date(0);
+            return dateB.getTime() - dateA.getTime();
+          });
+
+          setHostRequests(requestsData);
+        });
+
+        return unsubscribe;
+      } catch (err) {
+        console.error('Error fetching host requests:', err);
+      }
+    };
+
+    const unsubscribeBookings = fetchBookings();
+    const unsubscribeRequests = fetchHostRequests();
+    
     return () => {
-      if (unsubscribe) unsubscribe();
+      if (unsubscribeBookings) unsubscribeBookings();
+      if (unsubscribeRequests) unsubscribeRequests();
     };
   }, [user]);
+
+  const handleCardClick = (cardId: string) => {
+    navigate(`/card/${cardId}`);
+  };
+
+  const handleHostRequestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    
+    if (!user) {
+      setError('You must be logged in to submit a request');
+      return;
+    }
+
+    // Validate required fields
+    const requiredFields = ['fullName', 'phoneNumber', 'email', 'businessName', 'businessType', 'businessLocation', 'businessImageUrl', 'openingTime', 'closingTime'];
+    const missingFields = requiredFields.filter(field => !hostRequestForm[field as keyof HostRequestFormData]);
+    
+    if (missingFields.length > 0) {
+      setError(`Please fill in all required fields: ${missingFields.join(', ')}`);
+      return;
+    }
+
+    setSubmittingRequest(true);
+    setError('');
+
+    try {
+      await addDoc(collection(db, 'Requests'), {
+        ...hostRequestForm,
+        userId: user.uid,
+        status: 'pending',
+        createdAt: new Date()
+      });
+
+      // Reset form
+      setHostRequestForm({
+        fullName: '',
+        phoneNumber: '',
+        email: user.email || '',
+        businessName: '',
+        businessType: '',
+        businessLocation: '',
+        businessImageUrl: '',
+        openingTime: '',
+        closingTime: '',
+        comments: ''
+      });
+
+      // Switch to requests section to show the submitted request
+      setActiveSection('requests');
+      
+    } catch (err) {
+      console.error('Error submitting host request:', err);
+      setError('Failed to submit request. Please try again.');
+    } finally {
+      setSubmittingRequest(false);
+    }
+  };
+
+  const handleInputChange = (field: keyof HostRequestFormData, value: string) => {
+    setHostRequestForm(prev => ({
+      ...prev,
+      [field]: value
+    }));
+  };
 
   const isUpcoming = (dateString: string, timeSlot: string): boolean => {
     const bookingDateTime = new Date(dateString + ' ' + timeSlot);
@@ -242,6 +394,37 @@ const Dashboard: React.FC = () => {
                 <CreditCard className="w-5 h-5" />
                 <span className="font-medium">Your Cards</span>
               </button>
+
+              <button
+                onClick={() => setActiveSection('hostRequest')}
+                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+                  activeSection === 'hostRequest'
+                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                    : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                <Building className="w-5 h-5" />
+                <span className="font-medium">Request to become a host</span>
+              </button>
+
+              <button
+                onClick={() => setActiveSection('requests')}
+                className={`w-full flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors duration-200 ${
+                  activeSection === 'requests'
+                    ? 'bg-blue-100 text-blue-700 border-r-2 border-blue-600'
+                    : 'text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                <FileText className="w-5 h-5" />
+                <div className="flex items-center justify-between w-full">
+                  <span className="font-medium">Requests</span>
+                  {hostRequests.length > 0 && (
+                    <span className="bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full">
+                      {hostRequests.length}
+                    </span>
+                  )}
+                </div>
+              </button>
             </nav>
           </div>
         </div>
@@ -336,7 +519,7 @@ const Dashboard: React.FC = () => {
                         </h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                           {upcoming.map((booking) => (
-                            <BookingCard key={booking.id} booking={booking} isUpcoming={true} />
+                            <BookingCard key={booking.id} booking={booking} isUpcoming={true} onCardClick={handleCardClick} />
                           ))}
                         </div>
                       </div>
@@ -351,7 +534,7 @@ const Dashboard: React.FC = () => {
                         </h3>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                           {past.map((booking) => (
-                            <BookingCard key={booking.id} booking={booking} isUpcoming={false} />
+                            <BookingCard key={booking.id} booking={booking} isUpcoming={false} onCardClick={handleCardClick} />
                           ))}
                         </div>
                       </div>
@@ -390,7 +573,7 @@ const Dashboard: React.FC = () => {
                       <div 
                         key={booking.id}
                         className="border border-green-200 bg-green-50 rounded-lg p-4 transition-all duration-200 hover:shadow-md cursor-pointer"
-                        onClick={() => navigate(`/card/${booking.cardId}`)}
+                        onClick={() => handleCardClick(booking.cardId)}
                       >
                         <div className="flex items-start space-x-3">
                           <div className="flex-shrink-0">
@@ -468,6 +651,249 @@ const Dashboard: React.FC = () => {
               </div>
             </div>
           )}
+
+          {activeSection === 'hostRequest' && (
+            <div>
+              <div className="bg-white rounded-xl shadow-lg p-8">
+                <h2 className="text-2xl font-bold text-gray-900 mb-6">Request to become a host</h2>
+                <p className="text-gray-600 mb-8">
+                  Fill out this form to request becoming a host. We'll review your application and get back to you.
+                </p>
+
+                <form onSubmit={handleHostRequestSubmit} className="space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                      <label htmlFor="fullName" className="block text-sm font-medium text-gray-700 mb-2">
+                        Full Name *
+                      </label>
+                      <input
+                        type="text"
+                        id="fullName"
+                        value={hostRequestForm.fullName}
+                        onChange={(e) => handleInputChange('fullName', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="Enter your full name"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="phoneNumber" className="block text-sm font-medium text-gray-700 mb-2">
+                        Phone Number *
+                      </label>
+                      <input
+                        type="tel"
+                        id="phoneNumber"
+                        value={hostRequestForm.phoneNumber}
+                        onChange={(e) => handleInputChange('phoneNumber', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="Enter your phone number"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-2">
+                        Email *
+                      </label>
+                      <input
+                        type="email"
+                        id="email"
+                        value={hostRequestForm.email}
+                        onChange={(e) => handleInputChange('email', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="Enter your email"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="businessName" className="block text-sm font-medium text-gray-700 mb-2">
+                        Name of Business *
+                      </label>
+                      <input
+                        type="text"
+                        id="businessName"
+                        value={hostRequestForm.businessName}
+                        onChange={(e) => handleInputChange('businessName', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="Enter your business name"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="businessType" className="block text-sm font-medium text-gray-700 mb-2">
+                        Business Type *
+                      </label>
+                      <input
+                        type="text"
+                        id="businessType"
+                        value={hostRequestForm.businessType}
+                        onChange={(e) => handleInputChange('businessType', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="e.g., Sports Complex, Gym, Tennis Club"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="businessLocation" className="block text-sm font-medium text-gray-700 mb-2">
+                        Business Location *
+                      </label>
+                      <input
+                        type="text"
+                        id="businessLocation"
+                        value={hostRequestForm.businessLocation}
+                        onChange={(e) => handleInputChange('businessLocation', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="Enter your business address"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="openingTime" className="block text-sm font-medium text-gray-700 mb-2">
+                        Opening Time *
+                      </label>
+                      <input
+                        type="text"
+                        id="openingTime"
+                        value={hostRequestForm.openingTime}
+                        onChange={(e) => handleInputChange('openingTime', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="e.g., 6:00 AM"
+                      />
+                    </div>
+
+                    <div>
+                      <label htmlFor="closingTime" className="block text-sm font-medium text-gray-700 mb-2">
+                        Closing Time *
+                      </label>
+                      <input
+                        type="text"
+                        id="closingTime"
+                        value={hostRequestForm.closingTime}
+                        onChange={(e) => handleInputChange('closingTime', e.target.value)}
+                        required
+                        className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        placeholder="e.g., 10:00 PM"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label htmlFor="businessImageUrl" className="block text-sm font-medium text-gray-700 mb-2">
+                      Business Image URL *
+                    </label>
+                    <input
+                      type="url"
+                      id="businessImageUrl"
+                      value={hostRequestForm.businessImageUrl}
+                      onChange={(e) => handleInputChange('businessImageUrl', e.target.value)}
+                      required
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                      placeholder="https://example.com/business-image.jpg"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="comments" className="block text-sm font-medium text-gray-700 mb-2">
+                      Comments (Optional)
+                    </label>
+                    <textarea
+                      id="comments"
+                      value={hostRequestForm.comments}
+                      onChange={(e) => handleInputChange('comments', e.target.value)}
+                      rows={4}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                      placeholder="Any additional information about your business..."
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={submittingRequest}
+                    className="w-full bg-blue-600 text-white py-3 px-6 rounded-lg hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200 font-medium"
+                  >
+                    {submittingRequest ? 'Submitting Request...' : 'Submit Host Request'}
+                  </button>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'requests' && (
+            <div>
+              <div className="bg-white rounded-xl shadow-lg p-8">
+                <h2 className="text-2xl font-bold text-gray-900 mb-6">Your Requests</h2>
+                <p className="text-gray-600 mb-6">
+                  Track the status of your host requests here.
+                </p>
+
+                {hostRequests.length === 0 ? (
+                  <div className="text-center py-12">
+                    <FileText className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                    <h3 className="text-xl font-semibold text-gray-600 mb-2">No requests yet</h3>
+                    <p className="text-gray-500 mb-6">
+                      You haven't submitted any host requests yet.
+                    </p>
+                    <button
+                      onClick={() => setActiveSection('hostRequest')}
+                      className="inline-flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-200"
+                    >
+                      Submit a Request
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {hostRequests.map((request) => (
+                      <div key={request.id} className="border border-gray-200 rounded-lg p-6">
+                        <div className="flex items-start justify-between mb-4">
+                          <div>
+                            <h3 className="text-lg font-semibold text-gray-900">{request.businessName}</h3>
+                            <p className="text-gray-600">{request.businessType}</p>
+                          </div>
+                          <span className={`px-3 py-1 rounded-full text-sm font-medium ${
+                            request.status === 'pending' 
+                              ? 'bg-yellow-100 text-yellow-800'
+                              : request.status === 'approved'
+                              ? 'bg-green-100 text-green-800'
+                              : 'bg-red-100 text-red-800'
+                          }`}>
+                            {request.status.charAt(0).toUpperCase() + request.status.slice(1)}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-gray-600">
+                          <div>
+                            <span className="font-medium">Location:</span> {request.businessLocation}
+                          </div>
+                          <div>
+                            <span className="font-medium">Hours:</span> {request.openingTime} - {request.closingTime}
+                          </div>
+                          <div>
+                            <span className="font-medium">Contact:</span> {request.phoneNumber}
+                          </div>
+                          <div>
+                            <span className="font-medium">Submitted:</span> {request.createdAt?.toDate?.()?.toLocaleDateString() || 'Recently'}
+                          </div>
+                        </div>
+
+                        {request.comments && (
+                          <div className="mt-4 p-3 bg-gray-50 rounded-lg">
+                            <span className="font-medium text-gray-700">Comments:</span>
+                            <p className="text-gray-600 mt-1">{request.comments}</p>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       </div>
 
@@ -478,9 +904,11 @@ const Dashboard: React.FC = () => {
 };
 
 // Booking Card Component
-const BookingCard: React.FC<{ booking: BookingData; isUpcoming: boolean }> = ({ booking, isUpcoming }) => {
-  const navigate = useNavigate();
-
+const BookingCard: React.FC<{ 
+  booking: BookingData; 
+  isUpcoming: boolean; 
+  onCardClick: (cardId: string) => void;
+}> = ({ booking, isUpcoming, onCardClick }) => {
   const formatDate = (dateString: string): string => {
     const date = new Date(dateString);
     return date.toLocaleDateString('en-US', {
@@ -495,7 +923,7 @@ const BookingCard: React.FC<{ booking: BookingData; isUpcoming: boolean }> = ({ 
       className={`border rounded-lg p-4 transition-all duration-200 hover:shadow-md cursor-pointer ${
         isUpcoming ? 'border-green-200 bg-green-50' : 'border-gray-200 bg-gray-50'
       }`}
-      onClick={() => navigate(`/card/${booking.cardId}`)}
+      onClick={() => onCardClick(booking.cardId)}
     >
       <div className="flex items-start space-x-3">
         <div className="flex-shrink-0">
