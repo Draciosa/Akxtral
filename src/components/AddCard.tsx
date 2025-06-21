@@ -25,7 +25,7 @@ export default function AddCard({ onSuccess }: AddCardProps) {
   });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
 
   // Generate a random 30-character string with lowercase, uppercase, and numbers
   const generateCardId = (): string => {
@@ -65,6 +65,11 @@ export default function AddCard({ onSuccess }: AddCardProps) {
       return;
     }
 
+    if (!hasRole('admin')) {
+      setError('Only admins can create cards');
+      return;
+    }
+
     setIsLoading(true);
     setError('');
 
@@ -77,6 +82,7 @@ export default function AddCard({ onSuccess }: AddCardProps) {
         Card_ID: uniqueCardId,
         userId: user.uid,
         createdAt: new Date(),
+        updatedAt: new Date()
       });
       
       setFormData({ 
@@ -102,6 +108,14 @@ export default function AddCard({ onSuccess }: AddCardProps) {
     const { name, value } = e.target;
     setFormData((prev: FormData) => ({ ...prev, [name]: value }));
   };
+
+  if (!hasRole('admin')) {
+    return (
+      <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg">
+        Only administrators can create cards.
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">

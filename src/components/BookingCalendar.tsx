@@ -13,6 +13,7 @@ type CardData = {
   openingTime: string;
   closingTime: string;
   userId: string;
+  assignedHost?: string;
   createdAt: any;
   Card_ID: string;
 };
@@ -35,7 +36,7 @@ type Booking = {
 const BookingCalendar: React.FC = () => {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { user } = useAuth();
+  const { user, hasRole } = useAuth();
   const [card, setCard] = useState<CardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [selectedDate, setSelectedDate] = useState<Date | null>(null);
@@ -180,9 +181,31 @@ const BookingCalendar: React.FC = () => {
     });
   };
 
+  const canUserBookCard = (): boolean => {
+    if (!user || !card) return false;
+    
+    // Users can book any card
+    if (hasRole('user')) return true;
+    
+    // Hosts can book cards except their own assigned cards
+    if (hasRole('host')) {
+      return card.assignedHost !== user.uid;
+    }
+    
+    // Admins can book any card
+    if (hasRole('admin')) return true;
+    
+    return false;
+  };
+
   const handleConfirmBooking = async () => {
     if (!user) {
       setError('Please log in to make a booking');
+      return;
+    }
+
+    if (!canUserBookCard()) {
+      setError('You cannot book your own assigned card');
       return;
     }
 
@@ -377,6 +400,34 @@ const BookingCalendar: React.FC = () => {
   }
 
   if (!card) return null;
+
+  // Check if user can book this card
+  if (!canUserBookCard()) {
+    return (
+      <div className="container mx-auto px-4 py-8">
+        <button
+          onClick={() => navigate(`/card/${id}`)}
+          className="mb-6 inline-flex items-center text-blue-600 hover:text-blue-800 transition-colors duration-200 font-medium"
+        >
+          <ArrowLeft className="w-4 h-4 mr-2" />
+          Back to card details
+        </button>
+        <div className="text-center bg-white rounded-xl shadow-lg p-12">
+          <h2 className="text-2xl font-bold text-gray-900 mb-4">Cannot Book This Card</h2>
+          <p className="text-gray-600 mb-6">
+            {hasRole('host') ? 'You cannot book your own assigned card.' : 'You do not have permission to book this card.'}
+          </p>
+          <button
+            onClick={() => navigate('/')}
+            className="inline-flex items-center px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors duration-200"
+          >
+            <ArrowLeft className="w-4 h-4 mr-2" />
+            Browse Other Cards
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const weekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const monthNames = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];

@@ -46,20 +46,17 @@ service cloud.firestore {
       // Anyone can read cards
       allow read: if true;
       
-      // Hosts and admins can create cards
-      allow create: if hasAnyRole(['host', 'admin']);
+      // Only admins can create cards
+      allow create: if hasRole('admin');
       
-      // Card owners and admins can update cards
+      // Card owners (hosts assigned to the card) and admins can update cards
       allow update: if request.auth != null && (
-        resource.data.userId == request.auth.uid ||
+        (resource.data.assignedHost == request.auth.uid && hasRole('host')) ||
         hasRole('admin')
       );
       
-      // Card owners and admins can delete cards
-      allow delete: if request.auth != null && (
-        resource.data.userId == request.auth.uid ||
-        hasRole('admin')
-      );
+      // Only admins can delete cards
+      allow delete: if hasRole('admin');
     }
     
     // Bookings collection
@@ -70,7 +67,7 @@ service cloud.firestore {
         hasRole('admin')
       );
       
-      // Authenticated users can create bookings
+      // Authenticated users can create bookings (with restrictions handled in app logic)
       allow create: if request.auth != null &&
         request.resource.data.userId == request.auth.uid;
       
@@ -134,20 +131,21 @@ service cloud.firestore {
 
 3. **Test the rules:**
    - Users should only see their own data
-   - Hosts should be able to create and manage their own cards
+   - Hosts should be able to edit only assigned cards
    - Admins should have full access to all collections
 
 ## Role Hierarchy
 
 - **user**: Default role, can book slots, request to become host
-- **host**: Can create and manage cards, plus all user permissions
-- **admin**: Full access to all data and can manage user roles
+- **host**: Can edit assigned cards, plus all user permissions (except booking own cards)
+- **admin**: Full access to all data and can manage user roles and card assignments
 
 ## Security Features
 
 - Role-based access control
 - Users can only access their own data (except public cards)
 - Admins have full access for management
-- Hosts can manage their own cards
+- Hosts can only manage cards assigned to them
 - Proper validation for role changes (only admins can change roles)
 - Default role assignment for new users
+- Card assignment system for hosts
