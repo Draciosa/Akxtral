@@ -68,60 +68,68 @@ const Profile: React.FC = () => {
   }, [user]);
 
   const verifyMfaCode = async (secret: string, token: string): Promise<boolean> => {
-  const window = Math.floor(Date.now() / 30000);
+  const time = Math.floor(Date.now() / 30000);
+
   for (let i = -1; i <= 1; i++) {
-    const timeWindow = window + i;
-    const expectedToken = await generateTOTP(secret, timeWindow);
-    if (expectedToken === token) {
-      return true;
-    }
+    const expected = await generateTOTP(secret, time + i);
+    console.log(`TOTP window [${i}]: ${expected}`);
+    if (expected === token) return true;
   }
+
   return false;
 };
 
 
   const generateTOTP = async (secret: string, timeWindow: number): Promise<string> => {
   const key = base32Decode(secret);
-  const time = Math.floor(timeWindow);
-  const timeBytes = new ArrayBuffer(8);
-  const timeView = new DataView(timeBytes);
-  timeView.setUint32(4, time, false); // Big endian
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  view.setUint32(4, timeWindow, false);
 
-  const hash = await hmacSha1(key, new Uint8Array(timeBytes));
-  const offset = hash[hash.length - 1] & 0xf;
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign']
+  );
+
+  const hmac = await crypto.subtle.sign('HMAC', cryptoKey, new Uint8Array(buffer));
+  const hash = new Uint8Array(hmac);
+
+  const offset = hash[hash.length - 1] & 0x0f;
   const code = ((hash[offset] & 0x7f) << 24) |
                ((hash[offset + 1] & 0xff) << 16) |
                ((hash[offset + 2] & 0xff) << 8) |
                (hash[offset + 3] & 0xff);
 
-  return (code % 1000000).toString().padStart(6, '0');
+  const token = (code % 1_000_000).toString().padStart(6, '0');
+  return token;
 };
 
 
-  const base32Decode = (encoded: string): Uint8Array => {
-    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-    let bits = 0;
-    let value = 0;
-    let output = [];
-    
-    for (let i = 0; i < encoded.length; i++) {
-      const char = encoded[i];
-      if (char === '=') break;
-      
-      const index = alphabet.indexOf(char.toUpperCase());
-      if (index === -1) continue;
-      
-      value = (value << 5) | index;
-      bits += 5;
-      
-      if (bits >= 8) {
-        output.push((value >>> (bits - 8)) & 255);
-        bits -= 8;
-      }
+  const base32Decode = (input: string): Uint8Array => {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const cleaned = input.replace(/=+$/, '').toUpperCase();
+  let bits = 0;
+  let value = 0;
+  const output = [];
+
+  for (let i = 0; i < cleaned.length; i++) {
+    const idx = alphabet.indexOf(cleaned[i]);
+    if (idx === -1) continue;
+
+    value = (value << 5) | idx;
+    bits += 5;
+
+    if (bits >= 8) {
+      output.push((value >>> (bits - 8)) & 0xff);
+      bits -= 8;
     }
-    
-    return new Uint8Array(output);
-  };
+  }
+
+  return new Uint8Array(output);
+};
 
   const hmacSha1 = async (key: Uint8Array, data: Uint8Array): Promise<Uint8Array> => {
   const cryptoKey = await crypto.subtle.importKey(
@@ -205,24 +213,24 @@ const Profile: React.FC = () => {
   };
 
   const handleMfaVerification = async () => {
-    if (!mfaCode || mfaCode.length !== 6) {
-      setError('Please enter a valid 6-digit MFA code');
-      return;
-    }
+  if (!mfaCode || mfaCode.length !== 6) {
+    setError('Please enter a valid 6-digit MFA code');
+    return;
+  }
 
-    if (!profile.mfaSecret || !(await verifyMfaCode(profile.mfaSecret, mfaCode))) {
-  setError('Invalid MFA code. Please try again.');
-  return;
-}
+  if (!profile.mfaSecret || !(await verifyMfaCode(profile.mfaSecret, mfaCode))) {
+    setError('Invalid MFA code. Please try again.');
+    return;
+  }
 
+  if (pendingChanges) {
+    await saveChanges(pendingChanges);
+    setPendingChanges(null);
+    setShowMfaVerification(false);
+    setMfaCode('');
+  }
+};
 
-    if (pendingChanges) {
-      await saveChanges(pendingChanges);
-      setPendingChanges(null);
-      setShowMfaVerification(false);
-      setMfaCode('');
-    }
-  };
 
   const handleInputChange = (field: keyof UserProfile, value: string | boolean) => {
     setEditForm(prev => ({
