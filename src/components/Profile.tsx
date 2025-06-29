@@ -67,39 +67,36 @@ const Profile: React.FC = () => {
     fetchProfile();
   }, [user]);
 
-  const verifyMfaCode = (secret: string, token: string): boolean => {
-    // Simple TOTP verification (in production, use a proper library)
-    const window = Math.floor(Date.now() / 30000);
-    
-    // Check current window and ±1 window for clock drift
-    for (let i = -1; i <= 1; i++) {
-      const timeWindow = window + i;
-      const expectedToken = generateTOTP(secret, timeWindow);
-      if (expectedToken === token) {
-        return true;
-      }
+  const verifyMfaCode = async (secret: string, token: string): Promise<boolean> => {
+  const window = Math.floor(Date.now() / 30000);
+  for (let i = -1; i <= 1; i++) {
+    const timeWindow = window + i;
+    const expectedToken = await generateTOTP(secret, timeWindow);
+    if (expectedToken === token) {
+      return true;
     }
-    return false;
-  };
+  }
+  return false;
+};
 
-  const generateTOTP = (secret: string, timeWindow: number): string => {
-    // Simplified TOTP generation (use a proper library in production)
-    const key = base32Decode(secret);
-    const time = Math.floor(timeWindow);
-    const timeBytes = new ArrayBuffer(8);
-    const timeView = new DataView(timeBytes);
-    timeView.setUint32(4, time, false);
-    
-    // This is a simplified version - use crypto.subtle.importKey and sign in production
-    const hash = simpleHmacSha1(key, new Uint8Array(timeBytes));
-    const offset = hash[hash.length - 1] & 0xf;
-    const code = ((hash[offset] & 0x7f) << 24) |
-                 ((hash[offset + 1] & 0xff) << 16) |
-                 ((hash[offset + 2] & 0xff) << 8) |
-                 (hash[offset + 3] & 0xff);
-    
-    return (code % 1000000).toString().padStart(6, '0');
-  };
+
+  const generateTOTP = async (secret: string, timeWindow: number): Promise<string> => {
+  const key = base32Decode(secret);
+  const time = Math.floor(timeWindow);
+  const timeBytes = new ArrayBuffer(8);
+  const timeView = new DataView(timeBytes);
+  timeView.setUint32(4, time, false); // Big endian
+
+  const hash = await hmacSha1(key, new Uint8Array(timeBytes));
+  const offset = hash[hash.length - 1] & 0xf;
+  const code = ((hash[offset] & 0x7f) << 24) |
+               ((hash[offset + 1] & 0xff) << 16) |
+               ((hash[offset + 2] & 0xff) << 8) |
+               (hash[offset + 3] & 0xff);
+
+  return (code % 1000000).toString().padStart(6, '0');
+};
+
 
   const base32Decode = (encoded: string): Uint8Array => {
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -126,15 +123,18 @@ const Profile: React.FC = () => {
     return new Uint8Array(output);
   };
 
-  const simpleHmacSha1 = (key: Uint8Array, data: Uint8Array): Uint8Array => {
-    // Simplified HMAC-SHA1 (use crypto.subtle in production)
-    // This is just a placeholder - implement proper HMAC-SHA1
-    const result = new Uint8Array(20);
-    for (let i = 0; i < 20; i++) {
-      result[i] = (key[i % key.length] ^ data[i % data.length]) & 0xff;
-    }
-    return result;
-  };
+  const hmacSha1 = async (key: Uint8Array, data: Uint8Array): Promise<Uint8Array> => {
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, data);
+  return new Uint8Array(signature);
+};
+
 
   const handleEdit = () => {
     setIsEditing(true);
@@ -210,10 +210,11 @@ const Profile: React.FC = () => {
       return;
     }
 
-    if (!profile.mfaSecret || !verifyMfaCode(profile.mfaSecret, mfaCode)) {
-      setError('Invalid MFA code. Please try again.');
-      return;
-    }
+    if (!profile.mfaSecret || !(await verifyMfaCode(profile.mfaSecret, mfaCode))) {
+  setError('Invalid MFA code. Please try again.');
+  return;
+}
+
 
     if (pendingChanges) {
       await saveChanges(pendingChanges);
