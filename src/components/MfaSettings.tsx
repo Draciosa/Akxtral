@@ -69,47 +69,37 @@ const MfaSettings: React.FC = () => {
   };
 
   // Improved TOTP verification with proper base32 decoding
-  const verifyMfaCode = (secret: string, token: string): boolean => {
-    if (!secret || !token || token.length !== 6) return false;
-    
-    const window = Math.floor(Date.now() / 30000);
-    
-    // Check current window and ±2 windows for clock drift tolerance
-    for (let i = -2; i <= 2; i++) {
-      const timeWindow = window + i;
-      const expectedToken = generateTOTP(secret, timeWindow);
-      if (expectedToken === token) {
-        return true;
-      }
-    }
-    return false;
-  };
+  const verifyMfaCode = async (secret: string, token: string): Promise<boolean> => {
+  if (!secret || !token || token.length !== 6) return false;
 
-  const generateTOTP = (secret: string, timeWindow: number): string => {
-    try {
-      const key = base32ToBytes(secret);
-      
-      // Convert time to 8-byte array (big-endian)
-      const timeBytes = new ArrayBuffer(8);
-      const timeView = new DataView(timeBytes);
-      timeView.setUint32(4, timeWindow, false); // big-endian
-      
-      // Generate HMAC-SHA1
-      const hash = hmacSha1(key, new Uint8Array(timeBytes));
-      
-      // Dynamic truncation
-      const offset = hash[hash.length - 1] & 0xf;
-      const code = ((hash[offset] & 0x7f) << 24) |
-                   ((hash[offset + 1] & 0xff) << 16) |
-                   ((hash[offset + 2] & 0xff) << 8) |
-                   (hash[offset + 3] & 0xff);
-      
-      return (code % 1000000).toString().padStart(6, '0');
-    } catch (error) {
-      console.error('Error generating TOTP:', error);
-      return '000000';
-    }
-  };
+  const window = Math.floor(Date.now() / 30000);
+  for (let i = -2; i <= 2; i++) {
+    const expectedToken = await generateTOTP(secret, window + i);
+    if (expectedToken === token) return true;
+  }
+
+  return false;
+};
+
+
+  const generateTOTP = async (secret: string, timeWindow: number): Promise<string> => {
+  const key = base32ToBytes(secret);
+
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  view.setUint32(4, timeWindow, false); // Big-endian, 8 bytes
+
+  const hash = await hmacSha1(key, new Uint8Array(buffer));
+  const offset = hash[hash.length - 1] & 0xf;
+
+  const binary = ((hash[offset] & 0x7f) << 24) |
+                 ((hash[offset + 1] & 0xff) << 16) |
+                 ((hash[offset + 2] & 0xff) << 8) |
+                 (hash[offset + 3] & 0xff);
+
+  return (binary % 1000000).toString().padStart(6, '0');
+};
+
 
   const base32ToBytes = (base32: string): Uint8Array => {
     const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -136,70 +126,17 @@ const MfaSettings: React.FC = () => {
     return new Uint8Array(output);
   };
 
-  const hmacSha1 = (key: Uint8Array, data: Uint8Array): Uint8Array => {
-    const blockSize = 64;
-    
-    // Pad or hash key if necessary
-    let paddedKey = new Uint8Array(blockSize);
-    if (key.length > blockSize) {
-      // Hash the key if it's too long (simplified)
-      const hashedKey = simpleHash(key);
-      paddedKey.set(hashedKey.slice(0, blockSize));
-    } else {
-      paddedKey.set(key);
-    }
-    
-    // Create inner and outer padding
-    const innerPad = new Uint8Array(blockSize);
-    const outerPad = new Uint8Array(blockSize);
-    
-    for (let i = 0; i < blockSize; i++) {
-      innerPad[i] = paddedKey[i] ^ 0x36;
-      outerPad[i] = paddedKey[i] ^ 0x5c;
-    }
-    
-    // Hash inner pad + data
-    const innerHash = simpleHash(new Uint8Array([...innerPad, ...data]));
-    
-    // Hash outer pad + inner hash
-    const finalHash = simpleHash(new Uint8Array([...outerPad, ...innerHash]));
-    
-    return finalHash;
-  };
-
-  const simpleHash = (data: Uint8Array): Uint8Array => {
-    // Simplified SHA-1 like hash (for demo purposes)
-    const result = new Uint8Array(20);
-    let h0 = 0x67452301;
-    let h1 = 0xEFCDAB89;
-    let h2 = 0x98BADCFE;
-    let h3 = 0x10325476;
-    let h4 = 0xC3D2E1F0;
-    
-    // Process data in chunks
-    for (let i = 0; i < data.length; i += 64) {
-      const chunk = data.slice(i, i + 64);
-      
-      // Simple mixing function
-      for (let j = 0; j < chunk.length; j++) {
-        h0 = ((h0 << 5) | (h0 >>> 27)) + chunk[j] + h1;
-        h1 = h2;
-        h2 = (h3 << 30) | (h3 >>> 2);
-        h3 = h4;
-        h4 = h0;
-      }
-    }
-    
-    // Convert to bytes
-    const view = new DataView(result.buffer);
-    view.setUint32(0, h0, false);
-    view.setUint32(4, h1, false);
-    view.setUint32(8, h2, false);
-    view.setUint32(12, h3, false);
-    view.setUint32(16, h4, false);
-    
-    return result;
-  };
+const hmacSha1 = async (key: Uint8Array, data: Uint8Array): Promise<Uint8Array> => {
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    key,
+    { name: 'HMAC', hash: 'SHA-1' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', cryptoKey, data);
+  return new Uint8Array(signature);
+};
 
   const isDeviceRemembered = (email: string): boolean => {
     try {
@@ -273,10 +210,11 @@ const MfaSettings: React.FC = () => {
       return;
     }
 
-    if (!verifyMfaCode(mfaSecret, verificationCode)) {
-      setError('Invalid verification code. Please check your authenticator app and try again.');
-      return;
-    }
+    if (!(await verifyMfaCode(mfaSecret, verificationCode))) {
+  setError('Invalid verification code. Please check your authenticator app and try again.');
+  return;
+}
+
 
     setSaving(true);
     try {
@@ -304,10 +242,11 @@ const MfaSettings: React.FC = () => {
       return;
     }
 
-    if (!verifyMfaCode(mfaSecret, disableVerificationCode)) {
-      setError('Invalid verification code. Please try again.');
-      return;
-    }
+    if (!(await verifyMfaCode(mfaSecret, disableVerificationCode))) {
+  setError('Invalid verification code. Please try again.');
+  return;
+}
+
 
     setSaving(true);
     try {
