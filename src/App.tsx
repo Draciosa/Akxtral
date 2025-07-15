@@ -341,7 +341,7 @@ function App() {
 
   // Show login prompt for protected routes when not authenticated
   const LoginPrompt = () => (
-    <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center bg-gray-50 py-12 px-4">
+    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4">
       <div className="max-w-md w-full text-center bg-white p-6 sm:p-8 rounded-xl shadow-lg">
         <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
           <LogIn className="w-8 h-8 text-blue-600" />
