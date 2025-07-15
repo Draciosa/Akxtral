@@ -180,7 +180,7 @@ export default function CommunityCards() {
   if (loading && allCards.length === 0) {
     return (
       <div className="mb-12">
-        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-6">Community Cards</h2>
+        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-6">Grounds</h2>
         <div className="flex justify-center items-center py-12">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
         </div>
@@ -191,7 +191,7 @@ export default function CommunityCards() {
   if (error) {
     return (
       <div className="mb-12">
-        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-6">Community Cards</h2>
+        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-6">Grounds</h2>
         <div className="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-lg">
           <p>{error}</p>
           <p className="text-sm mt-1">Please try refreshing the page or contact support if the issue persists.</p>
@@ -203,7 +203,7 @@ export default function CommunityCards() {
   return (
     <div className="mb-12">
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 space-y-4 sm:space-y-0">
-        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900">Community Cards</h2>
+        <h2 className="text-2xl sm:text-3xl font-bold text-gray-900">Grounds</h2>
         <div className="text-sm text-gray-600">
           {filteredCards.length > 0 ? (
             <>Showing {((currentPage - 1) * CARDS_PER_PAGE) + 1}-{Math.min(currentPage * CARDS_PER_PAGE, filteredCards.length)} of {filteredCards.length} cards</>
@@ -254,9 +254,9 @@ export default function CommunityCards() {
                       target.src = 'https://images.pexels.com/photos/3657154/pexels-photo-3657154.jpeg?auto=compress&cs=tinysrgb&w=1260&h=750&dpr=2';
                     }}
                   />
-                  <div className="absolute top-2 left-2 bg-green-600 text-white px-2 py-1 rounded text-xs sm:text-sm">
+                  {/* <div className="absolute top-2 left-2 bg-green-600 text-white px-2 py-1 rounded text-xs sm:text-sm">
                     Community
-                  </div>
+                  </div> */}
                   {card.pricePerHour > 0 && (
                     <div className="absolute top-2 right-2 bg-blue-600 text-white px-2 py-1 rounded text-xs sm:text-sm font-semibold">
                       ₹{card.pricePerHour}/hr

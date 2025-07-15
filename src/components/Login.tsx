@@ -496,7 +496,7 @@ const Login = ({ onSignUpClick, onSuccess }: LoginProps) => {
         
         <div className="text-center mt-4">
           <p className="text-sm text-gray-600">
-            New to Akxtral? {' '}
+            New to Turfion? {' '}
             <button 
               onClick={onSignUpClick}
               className="font-medium text-blue-600 hover:text-blue-500"

@@ -70,7 +70,7 @@ const CardDetails: React.FC = () => {
 
   const getGoogleMapsEmbedUrl = (location: string) => {
     const encodedLocation = encodeURIComponent(location);
-    return `https://www.google.com/maps/embed/v1/place?key=AIzaSyBKgwdWH5zYIWEpig5qSdI1AwLeBI3GpLk&q=${encodedLocation}`;
+    return `https://www.google.com/maps?q=${encodedLocation}&output=embed`;
   };
 
   const LoginPromptModal = () => (
