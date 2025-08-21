@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { 
@@ -37,7 +37,11 @@ import {
   serverTimestamp,
   orderBy,
   getDocs,
-  getDoc
+  getDoc,
+  // NEW: server-side pagination helpers
+  limit as fbLimit,
+  startAfter,
+  getCountFromServer,
 } from 'firebase/firestore';
 import AddCard from './AddCard';
 import CardList from './CardList';
@@ -104,24 +108,148 @@ interface Notification {
   bookingTimeSlots?: string[];
 }
 
-const ITEMS_PER_PAGE = 10;
+const ITEMS_PER_PAGE = 5;
 
 const Dashboard: React.FC = () => {
   const { user, hasRole, userProfile } = useAuth();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('bookings');
+  const [activeTab, setActiveTab] = useState('notifications');
   const [activeRequestTab, setActiveRequestTab] = useState('host-requests');
+
+  // === Your Bookings (now server-side paginated + real-time per page) ===
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [bookingsPage, setBookingsPage] = useState(1);
+  const [bookingsTotalCount, setBookingsTotalCount] = useState<number>(0);
+  const [bookingsCursors, setBookingsCursors] = useState<any[]>([]); // last doc of each loaded page
+  const bookingsUnsubRef = useRef<null | (() => void)>(null);
+  const [bookingsRefreshNonce, setBookingsRefreshNonce] = useState<number>(0); // bumps to re-subscribe current page
+
+  // everything else unchanged
+  const [requestsPage, setRequestsPage] = useState(1);
+  const [notificationsPage, setNotificationsPage] = useState(1);
+
   const [requests, setRequests] = useState<Request[]>([]);
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [loading, setLoading] = useState(true);
   const [expandedBookings, setExpandedBookings] = useState<Set<string>>(new Set());
-  
-  // Pagination states
-  const [bookingsPage, setBookingsPage] = useState(1);
-  const [notificationsPage, setNotificationsPage] = useState(1);
-  const [requestsPage, setRequestsPage] = useState(1);
 
+  // ---- SERVER-SIDE PAGINATION HELPERS (BOOKINGS) ----
+  const bookingsBaseQuery = (uid: string) =>
+    query(
+      collection(db, 'bookings'),
+      where('userId', '==', uid),
+      orderBy('bookingTime', 'desc')
+    );
+
+  const subscribeBookingsPage = async (page: number) => {
+    if (!user) return;
+
+    // Cleanup previous subscription
+    if (bookingsUnsubRef.current) {
+      bookingsUnsubRef.current();
+      bookingsUnsubRef.current = null;
+    }
+
+    // Make sure total count is current (cheap aggregation)
+    try {
+      const countSnap = await getCountFromServer(bookingsBaseQuery(user.uid));
+      const newTotal = countSnap.data().count;
+      setBookingsTotalCount(newTotal);
+    } catch (e) {
+      console.error('Failed to fetch bookings count', e);
+    }
+
+    // Build paged query
+    let q = query(bookingsBaseQuery(user.uid), fbLimit(ITEMS_PER_PAGE));
+    if (page > 1) {
+      // Ensure we have a cursor for the previous page; if not, backfill by loading pages sequentially until we have it
+      let cursor = bookingsCursors[page - 2];
+      if (!cursor) {
+        // Load missing cursors quietly (one-time reads, not snapshots)
+        try {
+          let tmpQ = query(bookingsBaseQuery(user.uid), fbLimit(ITEMS_PER_PAGE));
+          let lastDoc: any = null;
+          const newCursors: any[] = [...bookingsCursors];
+          for (let p = 1; p < page; p++) {
+            const snap = await getDocs(tmpQ);
+            if (snap.docs.length === 0) break;
+            lastDoc = snap.docs[snap.docs.length - 1];
+            newCursors[p - 1] = lastDoc;
+            tmpQ = query(bookingsBaseQuery(user.uid), startAfter(lastDoc), fbLimit(ITEMS_PER_PAGE));
+          }
+          setBookingsCursors(newCursors);
+          cursor = newCursors[page - 2];
+        } catch (e) {
+          console.error('Error preloading cursors', e);
+        }
+      }
+      if (cursor) {
+        q = query(bookingsBaseQuery(user.uid), startAfter(cursor), fbLimit(ITEMS_PER_PAGE));
+      }
+    }
+
+    // Real-time subscription for the current page
+    const unsub = onSnapshot(q, async (snapshot) => {
+      const pageBookings: Booking[] = [];
+
+      for (const docSnapshot of snapshot.docs) {
+        const bookingData = {
+          id: docSnapshot.id,
+          ...docSnapshot.data()
+        } as Booking;
+
+        // Fetch card details (as before)
+        try {
+          if (bookingData.cardId) {
+            const cardDoc = await getDoc(doc(db, 'cards', bookingData.cardId));
+            if (cardDoc.exists()) {
+              const cardData = cardDoc.data();
+              bookingData.cardTitle = cardData.title;
+              bookingData.cardType = cardData.type;
+              bookingData.cardLocation = cardData.location;
+            }
+          }
+        } catch (error) {
+          console.error('Error fetching card details:', error);
+        }
+
+        pageBookings.push(bookingData);
+      }
+
+      // Save last doc as cursor for this page
+      const lastDoc = snapshot.docs[snapshot.docs.length - 1] || null;
+      setBookings((prev) => pageBookings);
+      setBookingsCursors((prev) => {
+        const next = [...prev];
+        // Page index -> lastDoc
+        if (lastDoc) next[bookingsPage - 1] = lastDoc;
+        return next;
+      });
+      setLoading(false);
+    }, (err) => {
+      console.error('Bookings page snapshot error:', err);
+      setLoading(false);
+    });
+
+    bookingsUnsubRef.current = unsub;
+  };
+
+  // Subscribe/refresh current bookings page whenever user/page/nonce changes
+  useEffect(() => {
+    if (!user) return;
+    setLoading(true);
+    subscribeBookingsPage(bookingsPage);
+    // cleanup on unmount or dependency change
+    return () => {
+      if (bookingsUnsubRef.current) {
+        bookingsUnsubRef.current();
+        bookingsUnsubRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, bookingsPage, bookingsRefreshNonce]);
+
+  // --- OTHER SNAPSHOTS (UNCHANGED) ---
   useEffect(() => {
     if (!user) {
       navigate('/');
@@ -130,46 +258,7 @@ const Dashboard: React.FC = () => {
 
     const unsubscribes: (() => void)[] = [];
 
-    // Fetch user's bookings
-    const bookingsQuery = query(
-      collection(db, 'bookings'),
-      where('userId', '==', user.uid),
-      orderBy('bookingTime', 'desc')
-    );
-
-    const unsubscribeBookings = onSnapshot(bookingsQuery, async (snapshot) => {
-      const bookingsData: Booking[] = [];
-      
-      for (const docSnapshot of snapshot.docs) {
-        const bookingData = {
-          id: docSnapshot.id,
-          ...docSnapshot.data()
-        } as Booking;
-
-        // Fetch card details for each booking
-        try {
-          const cardDoc = await getDoc(doc(db, 'cards', bookingData.cardId));
-          
-          if (cardDoc.exists()) {
-            const cardData = cardDoc.data();
-            bookingData.cardTitle = cardData.title;
-            bookingData.cardType = cardData.type;
-            bookingData.cardLocation = cardData.location;
-          }
-        } catch (error) {
-          console.error('Error fetching card details:', error);
-        }
-
-        bookingsData.push(bookingData);
-      }
-
-      setBookings(bookingsData);
-      setLoading(false);
-    });
-
-    unsubscribes.push(unsubscribeBookings);
-
-    // Fetch requests for admins
+    // Requests for admins
     if (hasRole('admin')) {
       const requestsQuery = query(
         collection(db, 'Requests'),
@@ -187,7 +276,7 @@ const Dashboard: React.FC = () => {
       unsubscribes.push(unsubscribeRequests);
     }
 
-    // Fetch notifications for the user
+    // Notifications for the user
     const notificationsQuery = query(
       collection(db, 'notifications'),
       where('userId', '==', user.uid),
@@ -403,6 +492,7 @@ const Dashboard: React.FC = () => {
     return bookingDateTime < new Date();
   };
 
+  // NOTE: With server-side pagination, these sections reflect the current page window.
   const upcomingBookings = bookings.filter(booking => !isBookingCompleted(booking));
   const completedBookings = bookings.filter(booking => isBookingCompleted(booking));
 
@@ -412,13 +502,12 @@ const Dashboard: React.FC = () => {
   const hostRequests = requests.filter(r => r.requestType === 'host-request' || r.requestType === 'new-card');
   const mfaResetRequests = requests.filter(r => r.requestType === 'mfa-reset');
 
-  // Pagination helpers
+  // Client-side pagination helpers for notifications/requests (unchanged)
   const getPaginatedItems = (items: any[], page: number) => {
     const startIndex = (page - 1) * ITEMS_PER_PAGE;
     const endIndex = startIndex + ITEMS_PER_PAGE;
     return items.slice(startIndex, endIndex);
-  };
-
+    };
   const getTotalPages = (items: any[]) => Math.ceil(items.length / ITEMS_PER_PAGE);
 
   const PaginationControls = ({ 
@@ -432,10 +521,15 @@ const Dashboard: React.FC = () => {
   }) => {
     if (totalPages <= 1) return null;
 
+    const safeChange = (next: number) => {
+      if (next < 1 || next > totalPages) return;
+      onPageChange(next);
+    };
+
     return (
       <div className="flex flex-col sm:flex-row items-center justify-center space-y-4 sm:space-y-0 sm:space-x-4 mt-6">
         <button
-          onClick={() => onPageChange(currentPage - 1)}
+          onClick={() => safeChange(currentPage - 1)}
           disabled={currentPage === 1}
           className="flex items-center px-4 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
         >
@@ -459,7 +553,7 @@ const Dashboard: React.FC = () => {
             return (
               <button
                 key={pageNum}
-                onClick={() => onPageChange(pageNum)}
+                onClick={() => safeChange(pageNum)}
                 className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors duration-200 ${
                   pageNum === currentPage
                     ? 'bg-blue-600 text-white'
@@ -473,7 +567,7 @@ const Dashboard: React.FC = () => {
         </div>
         
         <button
-          onClick={() => onPageChange(currentPage + 1)}
+          onClick={() => safeChange(currentPage + 1)}
           disabled={currentPage === totalPages}
           className="flex items-center px-4 py-2 text-sm font-medium text-gray-500 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 hover:text-gray-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-200"
         >
@@ -498,6 +592,16 @@ const Dashboard: React.FC = () => {
     );
   };
 
+const bookingsTotalPages = Math.max(
+  1,
+  Math.ceil(Math.min(bookingsTotalCount, bookings.length + (bookingsPage - 1) * ITEMS_PER_PAGE) / ITEMS_PER_PAGE)
+);
+
+  const refreshCurrentBookingsPage = () => {
+    // bump nonce to teardown & resubscribe only the bookings page listener
+    setBookingsRefreshNonce(n => n + 1);
+  };
+
   if (!user) {
     return (
       <div className="container mx-auto px-4 py-8">
@@ -519,8 +623,10 @@ const Dashboard: React.FC = () => {
   }
 
   const tabs = [
-    { id: 'bookings', label: 'Your Bookings', icon: Calendar },
     { id: 'notifications', label: `Notifications ${unreadNotifications.length > 0 ? `(${unreadNotifications.length})` : ''}`, icon: Bell },
+     ...((hasRole('user') || hasRole('host')) ? [
+    { id: 'bookings', label: 'Your Bookings', icon: Calendar }
+  ] : []),
     ...(hasRole('user') ? [
       { id: 'host-request', label: 'Become a Host', icon: UserPlus },
       { id: 'mfa-reset', label: 'MFA Reset', icon: Shield }
@@ -538,7 +644,7 @@ const Dashboard: React.FC = () => {
       { id: 'user-settings', label: 'User Settings', icon: Users },
       { id: 'manage-homepage', label: 'Manage Homepage', icon: Settings },
       { id: 'manage-hosts', label: 'Manage Hosts', icon: Users }
-    ] : [])
+    ] : []),
   ];
 
   return (
@@ -584,16 +690,29 @@ const Dashboard: React.FC = () => {
               
               {/* Upcoming Bookings */}
               <div>
-                <h3 className="text-lg font-semibold text-gray-800 mb-4">Upcoming Bookings ({upcomingBookings.length})</h3>
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold text-gray-800">
+                    Upcoming Bookings ({upcomingBookings.length})
+                  </h3>
+                  {/* Refresh ONLY the current page's bookings */}
+                  <button
+                    onClick={refreshCurrentBookingsPage}
+                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                    title="Refresh this page's bookings"
+                  >
+                    Refresh
+                  </button>
+                </div>
+
                 {upcomingBookings.length === 0 ? (
                   <div className="text-center py-8 bg-gray-50 rounded-lg">
                     <Calendar className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                    <p className="text-gray-500">No upcoming bookings</p>
+                    <p className="text-gray-500">No upcoming bookings on this page</p>
                   </div>
                 ) : (
                   <>
                     <div className="space-y-4">
-                      {getPaginatedItems(upcomingBookings, bookingsPage).map((booking) => (
+                      {upcomingBookings.map((booking) => (
                         <div key={booking.id} className="border border-gray-200 rounded-lg p-4">
                           <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start space-y-4 sm:space-y-0">
                             <div className="flex-1">
@@ -676,9 +795,11 @@ const Dashboard: React.FC = () => {
                         </div>
                       ))}
                     </div>
+
+                    {/* Server-side pagination controls for Bookings */}
                     <PaginationControls
                       currentPage={bookingsPage}
-                      totalPages={getTotalPages(upcomingBookings)}
+                      totalPages={bookingsTotalPages}
                       onPageChange={setBookingsPage}
                     />
                   </>
@@ -691,11 +812,11 @@ const Dashboard: React.FC = () => {
                 {completedBookings.length === 0 ? (
                   <div className="text-center py-8 bg-gray-50 rounded-lg">
                     <CheckCircle className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                    <p className="text-gray-500">No completed bookings</p>
+                    <p className="text-gray-500">No completed bookings on this page</p>
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {getPaginatedItems(completedBookings, bookingsPage).map((booking) => (
+                    {completedBookings.map((booking) => (
                       <div key={booking.id} className="border border-gray-200 rounded-lg p-4 bg-gray-50">
                         <div className="flex flex-col sm:flex-row sm:justify-between sm:items-start space-y-4 sm:space-y-0">
                           <div className="flex-1">
@@ -962,7 +1083,7 @@ const Dashboard: React.FC = () => {
   );
 };
 
-// Request Item Component
+// Request Item Component (unchanged)
 const RequestItem: React.FC<{
   request: Request;
   onApprove: (id: string, request: Request, response: string) => void;

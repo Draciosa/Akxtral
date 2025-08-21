@@ -1,6 +1,17 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { db } from '../lib/firebase';
-import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
+import {
+  collection,
+  query,
+  orderBy,
+  where,
+  limit,
+  startAfter,
+  onSnapshot,
+  getCountFromServer,
+  DocumentData,
+  QueryDocumentSnapshot
+} from 'firebase/firestore';
 import { useNavigate } from 'react-router-dom';
 import { Clock, ChevronLeft, ChevronRight, MapPin } from 'lucide-react';
 import SearchAndFilters, { FilterOptions } from './SearchAndFilters';
@@ -19,10 +30,19 @@ type CardData = {
   createdAt: any;
 };
 
-const CARDS_PER_PAGE = 9;
+const CARDS_PER_PAGE = 6;
 
 export default function CommunityCards() {
-  const [allCards, setAllCards] = useState<CardData[]>([]);
+const [cards, setCards] = useState<CardData[]>([]);
+const [totalCount, setTotalCount] = useState(0);
+
+const cursors = useRef<{ firstDocs: QueryDocumentSnapshot<DocumentData>[]; lastDocs: QueryDocumentSnapshot<DocumentData>[] }>({
+  firstDocs: [],
+  lastDocs: []
+});
+
+const unsubRef = useRef<null | (() => void)>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
@@ -34,150 +54,122 @@ export default function CommunityCards() {
     date: '',
     time: ''
   });
-  const navigate = useNavigate();
+  const navigate = useNavigate();  
 
-  // Memoize filtered cards to avoid recalculation on every render
-  const filteredCards = useMemo(() => {
-    let filtered = allCards;
+const totalPages = Math.max(1, Math.ceil(totalCount / CARDS_PER_PAGE));
 
-    // Apply search
-    if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase();
-      filtered = filtered.filter(card =>
-        card.title.toLowerCase().includes(searchLower) ||
-        card.type.toLowerCase().includes(searchLower) ||
-        card.location?.toLowerCase().includes(searchLower) ||
-        card.description?.toLowerCase().includes(searchLower)
-      );
-    }
+  const availableTypes = useMemo(() => 
+    [...new Set(cards.map(card => card.type))].filter(Boolean),
+    [cards]
+  );
 
-    // Apply filters
+const subscribeToPage = async (page: number) => {
+  if (unsubRef.current) {
+    unsubRef.current();
+    unsubRef.current = null;
+  }
+
+  setLoading(true);
+  setError('');
+
+  try {
+    const baseQuery = collection(db, 'cards');
+    const constraints: any[] = [];
+
+    // 🔹 Filters
     if (filters.type) {
-      filtered = filtered.filter(card => card.type === filters.type);
+      constraints.push(where('typeLower', '==', filters.type.toLowerCase()));
     }
 
     if (filters.minPrice > 0) {
-      filtered = filtered.filter(card => card.pricePerHour >= filters.minPrice);
+      constraints.push(where('pricePerHour', '>=', filters.minPrice));
     }
 
     if (filters.maxPrice > 0) {
-      filtered = filtered.filter(card => card.pricePerHour <= filters.maxPrice);
+      constraints.push(where('pricePerHour', '<=', filters.maxPrice));
     }
 
-    // Time filter - check if the card is open at the specified time
-    if (filters.time) {
-      filtered = filtered.filter(card => {
-        if (!card.openingTime || !card.closingTime) return true;
-        
-        const parseTime = (timeStr: string): number => {
-          const [time, period] = timeStr.split(' ');
-          const [hours, minutes] = time.split(':').map(Number);
-          let hour24 = hours;
-          
-          if (period?.toUpperCase() === 'PM' && hours !== 12) {
-            hour24 += 12;
-          } else if (period?.toUpperCase() === 'AM' && hours === 12) {
-            hour24 = 0;
-          }
-          
-          return hour24 * 60 + (minutes || 0);
-        };
-
-        try {
-          const searchTimeMinutes = parseTime(filters.time);
-          const openingMinutes = parseTime(card.openingTime);
-          const closingMinutes = parseTime(card.closingTime);
-          
-          return searchTimeMinutes >= openingMinutes && searchTimeMinutes < closingMinutes;
-        } catch (error) {
-          return true; // If parsing fails, include the card
-        }
-      });
+    // 🔹 Search
+    if (searchTerm) {
+      constraints.push(where('searchKeywords', '>=', searchTerm));
+      constraints.push(where('searchKeywords', '<=', searchTerm + '\uf8ff'));
+      constraints.push(orderBy('searchKeywords'));
+    } else {
+      constraints.push(orderBy('createdAt', 'desc'));
     }
 
-    return filtered;
-  }, [allCards, searchTerm, filters]);
+    // 🔹 Pagination
+    constraints.push(limit(CARDS_PER_PAGE));
+    if (page > 1 && cursors.current.lastDocs[page - 2]) {
+      constraints.push(startAfter(cursors.current.lastDocs[page - 2]));
+    }
 
-  // Memoize displayed cards for current page
-  const displayedCards = useMemo(() => {
-    const startIndex = (currentPage - 1) * CARDS_PER_PAGE;
-    const endIndex = startIndex + CARDS_PER_PAGE;
-    return filteredCards.slice(startIndex, endIndex);
-  }, [filteredCards, currentPage]);
+    // 🔹 Count docs (for pagination UI)
+    const countSnap = await getCountFromServer(query(baseQuery, ...constraints.filter(c => c !== limit(CARDS_PER_PAGE))));
+    setTotalCount(countSnap.data().count);
 
-  const totalPages = Math.ceil(filteredCards.length / CARDS_PER_PAGE);
-  const availableTypes = useMemo(() => 
-    [...new Set(allCards.map(card => card.type))].filter(Boolean),
-    [allCards]
-  );
+    const q = query(baseQuery, ...constraints);
 
-  useEffect(() => {
-    let unsubscribe: (() => void) | null = null;
+    const unsub = onSnapshot(q, (snap) => {
+      const data: CardData[] = snap.docs.map((doc) => ({
+        id: doc.id,
+        ...doc.data()
+      })) as CardData[];
 
-    const setupRealtimeListener = () => {
-      try {
-        setLoading(true);
-        setError('');
-        
-        // Optimize query with limit and ordering
-        const q = query(
-          collection(db, 'cards'),
-          orderBy('createdAt', 'desc'),
-          limit(100) // Limit to prevent loading too many cards at once
-        );
+      setCards(data);
 
-        unsubscribe = onSnapshot(q, (querySnapshot) => {
-          const cardsData: CardData[] = [];
-          
-          querySnapshot.forEach((doc) => {
-            cardsData.push({
-              id: doc.id,
-              ...doc.data()
-            } as CardData);
-          });
-
-          setAllCards(cardsData);
-          setLoading(false);
-        }, (err) => {
-          console.error('Error in real-time listener:', err);
-          setError('Unable to load community cards at the moment.');
-          setLoading(false);
-        });
-
-      } catch (err) {
-        console.error('Error setting up real-time listener:', err);
-        setError('Unable to load community cards at the moment.');
-        setLoading(false);
+      if (snap.docs.length > 0) {
+        cursors.current.firstDocs[page - 1] = snap.docs[0];
+        cursors.current.lastDocs[page - 1] = snap.docs[snap.docs.length - 1];
       }
-    };
 
-    setupRealtimeListener();
+      setCurrentPage(page);
+      setLoading(false);
+    });
 
-    return () => {
-      if (unsubscribe) unsubscribe();
-    };
-  }, []);
+    unsubRef.current = unsub;
+  } catch (err) {
+    console.error('Error setting up real-time paginated listener:', err);
+    setError('Unable to load community cards at the moment.');
+    setLoading(false);
+  }
+};
+
+
+
+// run on mount → first page
+useEffect(() => {
+  subscribeToPage(1);
+  return () => {
+    if (unsubRef.current) unsubRef.current();
+  };
+}, []);
+
 
   // Reset to first page when filters change
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [searchTerm, filters]);
+// Refetch when search or filters change
+useEffect(() => {
+  subscribeToPage(1);
+}, [searchTerm, filters]);
 
-  const handlePageChange = (page: number) => {
-    if (page >= 1 && page <= totalPages) {
-      setCurrentPage(page);
-    }
-  };
 
-  const handleSearch = (term: string) => {
-    setSearchTerm(term);
-  };
+const handlePageChange = (page: number) => {
+  if (page >= 1 && page <= totalPages) {
+    subscribeToPage(page);
+  }
+};
+
+
+const handleSearch = (term: string) => {
+  setSearchTerm(term.toLowerCase()); // always lowercase for querying
+};
+
 
   const handleFilterChange = (newFilters: FilterOptions) => {
     setFilters(newFilters);
   };
 
-  if (loading && allCards.length === 0) {
+  if (loading && cards.length === 0) {
     return (
       <div className="mb-12">
         <h2 className="text-2xl sm:text-3xl font-bold text-gray-900 mb-6">Grounds</h2>
@@ -205,8 +197,8 @@ export default function CommunityCards() {
       <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center mb-6 space-y-4 sm:space-y-0">
         <h2 className="text-2xl sm:text-3xl font-bold text-gray-900">Grounds</h2>
         <div className="text-sm text-gray-600">
-          {filteredCards.length > 0 ? (
-            <>Showing {((currentPage - 1) * CARDS_PER_PAGE) + 1}-{Math.min(currentPage * CARDS_PER_PAGE, filteredCards.length)} of {filteredCards.length} cards</>
+          {cards.length > 0 ? (
+            <>Showing {((currentPage - 1) * CARDS_PER_PAGE) + 1}-{Math.min(currentPage * CARDS_PER_PAGE, cards.length)} of {cards.length} cards</>
           ) : (
             <>No cards found</>
           )}
@@ -220,7 +212,7 @@ export default function CommunityCards() {
         availableTypes={availableTypes}
       />
       
-      {filteredCards.length === 0 ? (
+      {cards.length === 0 ? (
         <div className="text-center py-12 bg-gray-50 rounded-lg">
           <p className="text-gray-500 text-lg">
             {searchTerm || filters.type || filters.minPrice > 0 || filters.maxPrice > 0 || filters.date || filters.time
@@ -238,7 +230,7 @@ export default function CommunityCards() {
       ) : (
         <>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-            {displayedCards.map((card) => (
+            {cards.map((card) => (
               <div 
                 key={card.id} 
                 className="bg-white rounded-lg shadow-lg overflow-hidden hover:shadow-xl transition-all duration-300 cursor-pointer transform hover:scale-105"

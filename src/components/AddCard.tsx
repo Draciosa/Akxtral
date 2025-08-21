@@ -107,13 +107,25 @@ export default function AddCard({ onSuccess }: AddCardProps) {
       // Generate unique Card_ID
       const uniqueCardId = await generateUniqueCardId();
       
-      await addDoc(collection(db, 'cards'), {
-        ...formData,
-        Card_ID: uniqueCardId,
-        userId: user.uid,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
+      const searchKeywords = buildSearchKeywords(formData);
+
+await addDoc(collection(db, 'cards'), {
+  ...formData,
+  Card_ID: uniqueCardId,
+  userId: user.uid,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+
+  // 🔹 lowercase fields for search
+  titleLower: formData.title.toLowerCase(),
+  typeLower: formData.type.toLowerCase(),
+  locationLower: formData.location.toLowerCase(),
+  descriptionLower: formData.description.toLowerCase(),
+
+  // 🔹 combined field for multi-field search
+  searchKeywords,
+});
+
       
       setFormData({ 
         title: '', 
@@ -138,6 +150,15 @@ export default function AddCard({ onSuccess }: AddCardProps) {
       setIsLoading(false);
     }
   };
+
+  // Build a single lowercase searchKeywords string
+const buildSearchKeywords = (card: FormData) => {
+  return [card.title, card.type, card.location, card.description]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+};
+
 
   const handleChange = (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value, type } = e.target;
